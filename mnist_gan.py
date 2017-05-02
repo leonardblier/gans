@@ -1,14 +1,14 @@
 import numpy as np
 
 from keras.layers import Input
-from keras.layers.core import Dense, Flatten, Reshape, Lambda
-from keras.layers.convolutional import Conv2D, UpSampling2D
+from keras.layers.core import Dense, Flatten, Reshape, Lambda, Dropout
+from keras.layers.convolutional import Conv2D, UpSampling2D, ZeroPadding2D
 from keras.layers.normalization import BatchNormalization
 from keras.layers.pooling import MaxPooling2D, AveragePooling2D
 from keras.layers.advanced_activations import LeakyReLU
 from keras.models import Model
 from keras.optimizers import SGD, Adam
-from keras.callbacks import TensorBoard
+from keras.callbacks import TensorBoard, EarlyStopping
 
 
 import matplotlib
@@ -17,29 +17,30 @@ import matplotlib.pyplot as plt
 
 from keras.datasets import mnist
 
+from custom_keras import EarlyStoppingBound
+
 import ipdb
 
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
 
 ###############################
 ###### INPUTS PARAMETERS ######
-shape_noise = (256,)
+shape_noise = (100,)
 shape_img = (28,28)
 train_size = x_train.shape[0]
 batch_size = 32
 (mnist_train, y_train), (mnist_test, y_test) = mnist.load_data()
-x_train = mnist_train.astype(float)  / 255
-x_train = (x_train * 2) - 1
+x_train = (mnist_train.astype(float)  - 127.5) / 127.5
 ###############################
 
 
 ###############################
 #### Generators ###############
 class generator_seed(object):
-    def __init__(self, shape, batch_size, label_noise=0.):
+    def __init__(self, shape, batch_size, label=1.):
         self.shape = shape
         self.batch_size = batch_size
-        self.label_noise = label_noise
+        self.label = label
 
     def __iter__(self):
         return self
@@ -50,17 +51,17 @@ class generator_seed(object):
     def next(self):
         X = np.random.normal(size=np.prod(self.shape)*self.batch_size)
         X = X.reshape((self.batch_size,)+self.shape)
-        y = np.full((self.batch_size,), self.label_noise)
+        y = np.full((self.batch_size,), self.label)
         return X, y
 
 class generator_real_gen(object):
     def __init__(self, shape_seed, batch_size, model_g, real_data,
-                 prob_g=0.5, label_noise=1.):
+                 prob_g=0.5, label_gen=0.):
         self.shape_seed = shape_seed
         self.batch_size = batch_size
         self.model_g = model_g
         self.prob_g = prob_g
-        self.label_noise = label_noise
+        self.label_gen = label_gen
         self.real_data = real_data
 
 
@@ -71,22 +72,22 @@ class generator_real_gen(object):
         return self.next()
 
     def next(self):
-        y = np.random.binomial(1, self.prob_g, size=self.batch_size)
-        y_bool = y.astype(bool)
+        k = np.random.binomial(self.batch_size, self.prob_g)
+        y = np.full((self.batch_size,), 1 - self.label_gen)
+        X = np.zeros((self.batch_size,)+shape_img)
+        y[:k] = self.label_gen
 
-        u = np.random.rand()
+        # Generate pictures
+        seed = np.random.normal(size=k*np.prod(self.shape_seed))
+        seed = seed.reshape((k,)+self.shape_seed)
+        X[:k] = self.model_g.predict_on_batch(seed)
 
-        if u < self.prob_g:
-            seed = np.random.normal(size=np.prod(self.shape_seed)*self.batch_size)
-            seed = seed.reshape((self.batch_size,)+self.shape_seed)
-            X = self.model_g.predict_on_batch(seed)
-            y = np.full((self.batch_size,), self.label_noise)
-        else:
-            real_idx = np.random.randint(0,high=train_size, size=self.batch_size)
-            #X = self.real_data[real_idx,:,:,np.newaxis]
-            X = self.real_data[real_idx,:,:]
-            y = np.full((self.batch_size,), 1 - self.label_noise)
+
+        real_idx = np.random.randint(0,high=self.real_data.shape[0],
+                                     size=self.batch_size - k)
+        X[k:] = self.real_data[real_idx]
         return X, y
+
 
 def plot_batch(batch, namefile=None):
     fig, axes = plt.subplots(4, 8,
@@ -104,24 +105,30 @@ def plot_batch(batch, namefile=None):
     plt.close()
 
 
-gen_seed = generator_seed(shape_noise, 32)
+gen_seed_train = generator_seed(shape_noise, batch_size, label=1)
+gen_seed_eval = generator_seed(shape_noise, batch_size, label=1)
 
 
 ###############################
 ##### Generator Model   #######
 input_noise = Input(shape=shape_noise)
 g = input_noise
-g = BatchNormalization()(g)
+g = Dense(1024, activation="relu")(g)
 g = Dense(128*7*7, activation="relu")(g)
+g = BatchNormalization()(g)
+
 g = Reshape((7,7,128))(g)
+#g = Dropout(0.5)(g)
 
 # Input : (7,7), Output : (10,10)
 g = UpSampling2D((2,2))(g)
 g = Conv2D(64, (5,5), activation="relu")(g)
+#g = Dropout(0.5)(g)
 
 # Input : (10,10), Output : (16,16)
 g = UpSampling2D((2,2))(g)
 g = Conv2D(32, (5,5), activation="relu")(g)
+#g = Dropout(0.5)(g)
 
 # Input : (16,16), Output : (28,128)
 g = UpSampling2D((2,2))(g)
@@ -129,100 +136,172 @@ g = Conv2D(1, (5,5), activation="tanh")(g)
 #g = Lambda(lambda x: x[:,:,0])(g)
 g = Reshape(shape_img)(g)
 
+
 model_g = Model(inputs=input_noise, outputs=g)
 g_optim = SGD()
 model_g.compile(g_optim, loss='mean_squared_error')
 
 
 # Initialize the generator for generetaed/true img :
-gen_real_gen = generator_real_gen(shape_noise, 32, model_g, x_train, prob_g=0.5)
-
+gen_real_gen = generator_real_gen(shape_noise, 32, model_g, x_train,
+                                  prob_g=.5, label_gen=0.)
+gen_real_gen_eval = generator_real_gen(shape_noise, 32, model_g, x_test,
+                                       prob_g=.5, label_gen=0.)
 ##############################
 #### Discriminator Model #####
-input_img = Input(shape=shape_img)
+class model_discriminator(object):
+    def __init__(self):
+        self.conv1 = Conv2D(64, (5,5), activation='relu')
+        self.conv2 = Conv2D(128, (5,5), activation='relu')
+        self.conv3 = Conv2D(256, (5,5), activation='relu')
 
-d = Flatten()(input_img)
-d = BatchNormalization()(d)
-d = Reshape(shape_img+(1,))(d)
+        self.dense1 = Dense(1024, activation='relu')
+        self.dense2 = Dense(1, activation="sigmoid")
+        self.batchnorm = BatchNormalization()
 
-d = Conv2D(128, (5,5))(d)
-d = LeakyReLU()(d)
-d = AveragePooling2D()(d)
-#d = MaxPooling2D((2,2))(d)
-d = Conv2D(64, (5,5))(d)
-d = LeakyReLU()(d)
-d = AveragePooling2D()(d)
-#d = MaxPooling2D((2,2))(d)
+    def __call__(self, input_img, dropout=False):
+        d = input_img
+        # d = Flatten()(input_img)
+        # d = self.batchnorm(d)
+        d = Reshape(shape_img+(1,))(d)
 
-# d = Conv2D(32, (5,5))(d)
-# d = LeakyReLU()(d)
-# d = AveragePooling2D()(d)
+        # CONV 1
+        #d = ZeroPadding2D(padding=(2,2))(d)
+        d = self.conv1(d)
+        #d = LeakyReLU()(d)
+        d = AveragePooling2D()(d)
 
-d = Flatten()(d)
-d = Dense(512)(d)
-d = LeakyReLU()(d)
-d = Dense(1, activation="sigmoid")(d)
+        if dropout:
+           d = Dropout(0.5)(d)
+        #d = ZeroPadding2D(padding=(2,2))(d)
+        d = self.conv2(d)
+        #d = LeakyReLU()(d)
+        d = AveragePooling2D()(d)
+        if dropout:
+           d = Dropout(0.5)(d)
+
+        #d = MaxPooling2D((2,2))(d)
+
+        #d = ZeroPadding2D(padding=(2,2))(d)
+        # d = self.conv3(d)
+        # #d = LeakyReLU()(d)
+        # d = AveragePooling2D()(d)
+
+        d = Flatten()(d)
+        if dropout:
+            d = Dropout(0.5)(d)
+
+        d = self.dense1(d)
+        if dropout:
+            d = Dropout(0.5)(d)
+        #d = LeakyReLU()(d)
+        d = self.dense2(d)
+
+        model = Model(inputs=input_img, outputs=d)
+
+        return model
 
 
-#d_optim = SGD(lr=0.0005, momentum=0.9, nesterov=True)
-d_optim = Adam(lr=0.000005)
-#early_stopping_acc = EarlyStopping(monitor='binary_accuracy', min_delta=0.1, patience=0, verbose=0, mode='auto')
-model_d = Model(inputs=input_img, outputs=d)
-model_d.compile(d_optim,
-                loss="binary_crossentropy",
-                metrics=["binary_accuracy"])
+
+input_img_train = Input(shape=shape_img)
+input_img_eval = Input(shape=shape_img)
+
+model_discr_class = model_discriminator()
+model_d_train = model_discr_class(input_img_train, dropout=False)
+#optim_d_train = Adam(lr=0.00001)
+d_optim = SGD(lr=0.0005, momentum=0.9, nesterov=True)
+model_d_train.compile(d_optim, loss="binary_crossentropy",
+                      metrics=["binary_accuracy"])
+
+
+
+
+model_d_eval = model_discr_class(input_img_eval, dropout=False)
+model_d_eval.trainable = False
+for l in model_d_eval.layers:
+    l.trainable = False
 
 # These two lines are only there to avoid the batchnorm bug
-batch, y = gen_real_gen.next()
-model_d.train_on_batch(batch, y)
+#batch, y = gen_real_gen.next()
+#model_d.train_on_batch(batch, y)
 
 ###############################
 ##### Comb of the two models ##
-model_d.trainable = False
-for l in model_d.layers:
-    l.trainable = False
-dg = model_d(g)
-model_dg = Model(inputs=input_noise, outputs=dg)
-dg_optim = Adam(lr=0.0005)
 
+dg = model_d_eval(g)
+model_dg = Model(inputs=input_noise, outputs=dg)
+#dg_optim = Adam(lr=0.0005)
+dg_optim = SGD(lr=0.0005, momentum=0.9, nesterov=True)
 model_dg.compile(optimizer=dg_optim, loss="binary_crossentropy",
                  metrics=["binary_accuracy"])
 
 
 
 
+def train_acc_bound():
+    tboard_g = TensorBoard(log_dir='./logs', histogram_freq=1,
+                           write_graph=True, write_images=True)
+    tboard_d = TensorBoard(log_dir='./logs', histogram_freq=1,
+                           write_graph=True, write_images=True)
+    bound_acc = EarlyStoppingBound(0.7, 'val_binary_accuracy', 'upper')
+    early_stop = EarlyStopping('val_loss', min_delta=0.01, patience=6)
 
-tboard_g = TensorBoard(log_dir='./logs/g', histogram_freq=1,
-                       write_graph=True, write_images=False)
-tboard_d = TensorBoard(log_dir='./logs/g', histogram_freq=1,
-                       write_graph=True, write_images=False)
+    epoch_g = 0
+    epoch_d = 0
+    for count in range(100):
+        print("Starting loop "+str(count))
 
-for count in range(100):
-    print("Starting loop "+str(count))
-    acc_g = 0.
-    acc_d = 0
-
-
-    while acc_g < 0.9:
         print("Train generative network")
-        hist = model_dg.fit_generator(gen_seed, steps_per_epoch=50,
-                                      epochs = 1,
-                                      callbacks=[tboard_g])
-        acc_g = hist.history["binary_accuracy"][-1]
+        model_dg.fit_generator(gen_seed_train, steps_per_epoch=100,
+                               epochs = 100,
+                               callbacks=[tboard_g, bound_acc, early_stop],
+                               validation_data=gen_seed_eval,
+                               validation_steps=50)#,
 
-    batch_seed, _ = gen_seed.next()
-    batch_img = model_g.predict_on_batch(batch_seed)
-    plot_batch(batch_img, namefile="img/gen"+str(count)+".png")
-    while acc_d < 0.9:
-        # steps_per_epoch = 50
-        # acc = []
-        # for _ in range(steps_per_epoch):
-        #     batch, y = gen_real_gen.next()
-        #     acc.append(model_d.train_on_batch(batch, y)[1])
-        # acc_d = np.mean(acc)
+
+        print("Printing an image.")
+        batch_seed, _ = gen_seed_eval.next()
+        batch_img = model_g.predict_on_batch(batch_seed)
+        plot_batch(batch_img, namefile="img/gen"+str(count)+".png")
+
+
 
         print("Train Discriminative network")
-        hist = model_d.fit_generator(gen_real_gen, steps_per_epoch=50,
-                                     epochs = 1, workers=1,
-                                     callbacks=[tboard_d])
-        acc_d = hist.history["binary_accuracy"][-1]
+        model_d_train.fit_generator(gen_real_gen, steps_per_epoch=100,
+                                    epochs = 100, workers=1,
+                                    callbacks=[bound_acc, early_stop],
+                                    validation_data=gen_real_gen_eval,
+                                    validation_steps=50)
+
+def train_each():
+    gamma = 1
+    for epoch in range(100):
+        print("EPOCH : "+str(epoch))
+        d_loss, d_acc = 0., 0.
+        dg_loss, dg_acc = 0., 0.
+        for index in range(x_train.shape[0]//batch_size):
+            if index % 20 == 1:
+                print("Discriminator loss : %f accuracy : %f" % \
+                      (d_loss / index, d_acc / index))
+                print("Generator loss : %f accuracy : %f" % \
+                      (dg_loss / (index*gamma), dg_acc / (index*gamma)))
+
+
+            X, y = gen_real_gen.next()
+            l, acc = model_d_train.train_on_batch(X, y)
+            d_loss += l
+            d_acc += acc
+
+            for _ in range(gamma):
+                X, y = gen_seed_train.next()
+                l, acc = model_dg.train_on_batch(X,y)
+                dg_loss += l
+                dg_acc += acc
+
+        print("Printing an image.")
+        batch_seed, _ = gen_seed_eval.next()
+        batch_img = model_g.predict_on_batch(batch_seed)
+        plot_batch(batch_img, namefile="img/gen"+str(epoch)+".png")
+
+if __name__ == "__main__":
+    train_each()
