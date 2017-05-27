@@ -50,7 +50,7 @@ def train_acc_bound(model_d, model_dg, model_g,
 
 def train_each(model_d, model_dg, model_g,
                gen_d_train, gen_d_eval, gen_dg_train, gen_dg_eval,
-               train_size, batch_size, batch_true, nepoch=100, 
+               train_size, batch_size, nepoch=100, 
                track_metrics=False, namefile_prefix="img/output"):
     #gamma = 1
     for epoch in range(nepoch):

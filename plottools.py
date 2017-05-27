@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import norm
 
 import matplotlib
 matplotlib.use('Agg')
@@ -60,7 +61,7 @@ def plot_all(loss_dict, acc_dict, batch_true, batch_gen,
     x_loss = np.arange(500)
     ax_loss.set_xlim([0., x.max()])
     for label, loss in loss_dict.items():
-        ax_loss.plot(x, loss, label=label, linewidth=1., alpha=0.7)
+        ax_loss.plot(x, loss, label=label, linewidth=.6, alpha=0.7)
     ax_loss.set_yscale('log')
     #ax_loss.set_xlabel('Mini-batch-number')
     #ax_loss.set_ylabel('Loss (log-scale)')
@@ -71,7 +72,7 @@ def plot_all(loss_dict, acc_dict, batch_true, batch_gen,
     ax_acc.grid(axis='y', color='k', linewidth=0.2)
     
     for label, acc in acc_dict.items():
-        ax_acc.plot(x, acc, label=label, linewidth=1., alpha=0.7)
+        ax_acc.plot(x, acc, label=label, linewidth=.6, alpha=0.7)
     #ax_acc.plot(x, half, 'k--', linewidth=.5)
     ax_acc.set_xlim([0., x.max()])
     ax_acc.set_ylim([-0.01, 1.01])
@@ -158,3 +159,34 @@ def plot_all(loss_dict, acc_dict, batch_true, batch_gen,
     #gs.tight_layout()
     gs.update(hspace=1.)
     plt.savefig(namefile, format='pdf')
+    
+    
+def plot_latent_space(x, y, encoder, batch_size, namefile):
+    x_encoded = encoder.predict(x, batch_size=batch_size)
+    plt.figure(figsize=(6, 6))
+    plt.scatter(x_encoded[:, 0], x_encoded[:, 1], c=y)
+    plt.colorbar()
+    plt.savefig(namefile)
+    
+def plot_manifold(generator, batch_size, ndigits=15, digit_size=28):
+    # display a 2D manifold of the digits
+    n = 15  # figure with 15x15 digits
+    digit_size = 28
+    figure = np.zeros((digit_size * n, digit_size * n)) 
+    # linearly spaced coordinates on the unit square were transformed through the inverse CDF (ppf) of the Gaussian
+    # to produce values of the latent variables z, since the prior of the latent space is Gaussian
+    grid_x = norm.ppf(np.linspace(0.05, 0.95, n))
+    grid_y = norm.ppf(np.linspace(0.05, 0.95, n))
+
+    for i, yi in enumerate(grid_x):
+        for j, xi in enumerate(grid_y):
+            z_sample = np.array([[xi, yi]])
+            z_sample = np.tile(z_sample, batch_size).reshape(batch_size, 2)
+            x_decoded = generator.predict(z_sample, batch_size=batch_size)
+            digit = x_decoded[0].reshape(digit_size, digit_size)
+            figure[i * digit_size: (i + 1) * digit_size,
+                j * digit_size: (j + 1) * digit_size] = digit
+    
+    plt.figure(figsize=(10, 10))
+    plt.imshow(figure, cmap='Greys_r')
+    plt.savefig("img/vae_manifold.png")

@@ -4,16 +4,30 @@ with Keras and deconvolution layers.
 Reference: "Auto-Encoding Variational Bayes" https://arxiv.org/abs/1312.6114
 '''
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 
-from keras.layers import Input, Dense, Lambda, Flatten, Reshape, Layer
-from keras.layers import Conv2D, Conv2DTranspose
+from keras.layers import Input, Dense, Lambda, Flatten, Reshape, Layer, Dropout
+from keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, ZeroPadding2D
+from keras.layers.pooling import MaxPooling2D, AveragePooling2D
+from keras.layers.normalization import BatchNormalization
+from keras.layers.advanced_activations import LeakyReLU
 from keras.models import Model
 from keras import backend as K
 from keras import metrics
+from keras.optimizers import SGD, Adam
 from keras.datasets import mnist
 
+from custom_keras import CustomVariationalLayer
+from plottools import plot_latent_space, plot_manifold
+from generators import generator_real_gen
+
+
+############################################
+###### PARAMETERS ##########################
+############################################
 # input image dimensions
 img_rows, img_cols, img_chns = 28, 28, 1
 # number of convolutional filters to use
@@ -29,9 +43,29 @@ else:
 latent_dim = 2
 intermediate_dim = 128
 epsilon_std = 1.0
-epochs = 5
+epochs = 10
 
-x = Input(batch_shape=(batch_size,) + original_img_size)
+(x_train, _), (x_test, y_test) = mnist.load_data()
+
+x_train = x_train.astype('float32') / 255.
+x_train = x_train.reshape((x_train.shape[0],) + original_img_size)
+x_test = x_test.astype('float32') / 255.
+x_test = x_test.reshape((x_test.shape[0],) + original_img_size)
+
+print('x_train.shape:', x_train.shape)
+##############################################
+##############################################
+
+
+
+##############################################
+################## ENCODER ###################
+
+
+batch_size = batch_size
+original_img_size = original_img_size
+
+#x = Input(batch_shape=(batch_size,) + original_img_size)
 conv_1 = Conv2D(img_chns,
                 kernel_size=(2, 2),
                 padding='same', activation='relu')(x)
@@ -60,11 +94,11 @@ def sampling(args):
                               mean=0., stddev=epsilon_std)
     return z_mean + K.exp(z_log_var) * epsilon
 
-# note that "output_shape" isn't necessary with the TensorFlow backend
-# so you could write `Lambda(sampling)([z_mean, z_log_var])`
-z = Lambda(sampling, output_shape=(latent_dim,))([z_mean, z_log_var])
+z = Lambda(sampling)([z_mean, z_log_var])
 
-# we instantiate these layers separately so as to reuse them later
+#################################################
+################## DECODER ######################
+
 decoder_hid = Dense(intermediate_dim, activation='relu')
 decoder_upsample = Dense(filters * 14 * 14, activation='relu')
 
@@ -87,6 +121,7 @@ if K.image_data_format() == 'channels_first':
     output_shape = (batch_size, filters, 29, 29)
 else:
     output_shape = (batch_size, 29, 29, filters)
+    
 decoder_deconv_3_upsamp = Conv2DTranspose(filters,
                                           kernel_size=(3, 3),
                                           strides=(2, 2),
@@ -104,62 +139,27 @@ deconv_1_decoded = decoder_deconv_1(reshape_decoded)
 deconv_2_decoded = decoder_deconv_2(deconv_1_decoded)
 x_decoded_relu = decoder_deconv_3_upsamp(deconv_2_decoded)
 x_decoded_mean_squash = decoder_mean_squash(x_decoded_relu)
+#################################################
 
 
-# Custom loss layer
-class CustomVariationalLayer(Layer):
-    def __init__(self, **kwargs):
-        self.is_placeholder = True
-        super(CustomVariationalLayer, self).__init__(**kwargs)
 
-    def vae_loss(self, x, x_decoded_mean_squash):
-        x = K.flatten(x)
-        x_decoded_mean_squash = K.flatten(x_decoded_mean_squash)
-        xent_loss = img_rows * img_cols * metrics.binary_crossentropy(x, x_decoded_mean_squash)
-        kl_loss = - 0.5 * K.mean(1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
-        return K.mean(xent_loss + kl_loss)
-
-    def call(self, inputs):
-        x = inputs[0]
-        x_decoded_mean_squash = inputs[1]
-        loss = self.vae_loss(x, x_decoded_mean_squash)
-        self.add_loss(loss, inputs=inputs)
-        # We don't use this output.
-        return x
-
-
-y = CustomVariationalLayer()([x, x_decoded_mean_squash])
+###################################################
+########### MODEL VAE (and train) #################
+y = CustomVariationalLayer(img_rows, img_cols)(\
+    [x, x_decoded_mean_squash, z_mean, z_log_var])
 vae = Model(x, y)
 vae.compile(optimizer='rmsprop', loss=None)
 vae.summary()
 
-# train the VAE on MNIST digits
-(x_train, _), (x_test, y_test) = mnist.load_data()
-
-x_train = x_train.astype('float32') / 255.
-x_train = x_train.reshape((x_train.shape[0],) + original_img_size)
-x_test = x_test.astype('float32') / 255.
-x_test = x_test.reshape((x_test.shape[0],) + original_img_size)
-
-print('x_train.shape:', x_train.shape)
-
-vae.fit(x_train,
-        shuffle=True,
-        epochs=epochs,
-        batch_size=batch_size,
+vae.fit(x_train, shuffle=True, epochs=epochs, batch_size=batch_size,
         validation_data=(x_test, x_test))
+###################################################
 
-# build a model to project inputs on the latent space
+
+#################################################
+######### MODEL ENCODER and GENERATOR ###########
 encoder = Model(x, z_mean)
 
-# display a 2D plot of the digit classes in the latent space
-x_test_encoded = encoder.predict(x_test, batch_size=batch_size)
-plt.figure(figsize=(6, 6))
-plt.scatter(x_test_encoded[:, 0], x_test_encoded[:, 1], c=y_test)
-plt.colorbar()
-plt.show()
-
-# build a digit generator that can sample from the learned distribution
 decoder_input = Input(shape=(latent_dim,))
 _hid_decoded = decoder_hid(decoder_input)
 _up_decoded = decoder_upsample(_hid_decoded)
@@ -170,24 +170,115 @@ _x_decoded_relu = decoder_deconv_3_upsamp(_deconv_2_decoded)
 _x_decoded_mean_squash = decoder_mean_squash(_x_decoded_relu)
 generator = Model(decoder_input, _x_decoded_mean_squash)
 
-# display a 2D manifold of the digits
-n = 15  # figure with 15x15 digits
-digit_size = 28
-figure = np.zeros((digit_size * n, digit_size * n))
-# linearly spaced coordinates on the unit square were transformed through the inverse CDF (ppf) of the Gaussian
-# to produce values of the latent variables z, since the prior of the latent space is Gaussian
-grid_x = norm.ppf(np.linspace(0.05, 0.95, n))
-grid_y = norm.ppf(np.linspace(0.05, 0.95, n))
+#################################################
+######## MODEL DISCRIMINATOR ####################
+class model_discriminator(object):
+    def __init__(self):
+        self.conv1 = Conv2D(64, (5,5))
+        self.conv2 = Conv2D(128, (5,5))
+        self.conv3 = Conv2D(256, (5,5))
 
-for i, yi in enumerate(grid_x):
-    for j, xi in enumerate(grid_y):
-        z_sample = np.array([[xi, yi]])
-        z_sample = np.tile(z_sample, batch_size).reshape(batch_size, 2)
-        x_decoded = generator.predict(z_sample, batch_size=batch_size)
-        digit = x_decoded[0].reshape(digit_size, digit_size)
-        figure[i * digit_size: (i + 1) * digit_size,
-               j * digit_size: (j + 1) * digit_size] = digit
+        self.dense1 = Dense(100)
+        self.dense2 = Dense(1, activation="sigmoid")
+        self.batchnorm = BatchNormalization()
 
-plt.figure(figsize=(10, 10))
-plt.imshow(figure, cmap='Greys_r')
-plt.show()
+    def __call__(self, input_img, dropout=False):
+        d = input_img
+        # d = Flatten()(input_img)
+        # d = self.batchnorm(d)
+        # d = Reshape(shape_img+(1,))(d)
+
+        # CONV 1
+        #d = ZeroPadding2D(padding=(2,2))(d)
+        d = self.conv1(d)
+        d = LeakyReLU()(d)
+        d = AveragePooling2D()(d)
+
+        if dropout:
+           d = Dropout(0.5)(d)
+        #d = ZeroPadding2D(padding=(2,2))(d)
+        d = self.conv2(d)
+        d = LeakyReLU()(d)
+        d = AveragePooling2D()(d)
+        if dropout:
+           d = Dropout(0.5)(d)
+
+        #d = MaxPooling2D((2,2))(d)
+
+        d = ZeroPadding2D(padding=(2,2))(d)
+        d = self.conv3(d)
+        d = LeakyReLU()(d)
+        d = AveragePooling2D()(d)
+
+        d = Flatten()(d)
+        if dropout:
+            d = Dropout(0.5)(d)
+
+        d = self.dense1(d)
+        if dropout:
+            d = Dropout(0.5)(d)
+        #d = LeakyReLU()(d)
+        d = self.dense2(d)
+
+        model = Model(inputs=input_img, outputs=d)
+
+        return model
+
+
+
+input_img_train = Input(shape=original_img_size)
+input_img_eval = Input(shape=original_img_size)
+
+model_discr_class = model_discriminator()
+discriminator_train = model_discr_class(input_img_train, dropout=True)
+#optim_d_train = Adam(lr=0.00001)
+d_optim = SGD(lr=0.001, momentum=0.9, nesterov=True)
+discriminator_train.compile(d_optim, loss="binary_crossentropy",
+                      metrics=["binary_accuracy"])
+
+print("MODEL D :")
+discriminator_train.summary()
+
+discriminator_eval = model_discr_class(input_img_eval, dropout=False)
+discriminator_eval.trainable = False
+for l in discriminator_eval.layers:
+    l.trainable = False
+
+# These two lines are only there to avoid the batchnorm bug
+#batch, y = gen_real_gen.next()
+#model_d.train_on_batch(batch, y)
+
+###############################
+##### Comb of the two models ##
+dg = discriminator_eval(_x_decoded_mean_squash)
+model_dg = Model(inputs=decoder_input, outputs=dg)
+#dg_optim = Adam(lr=0.0005)
+dg_optim = SGD(lr=0.001, momentum=0.9, nesterov=True)
+model_dg.compile(optimizer=dg_optim, loss="binary_crossentropy",
+                 metrics=["binary_accuracy"])
+
+
+##################################
+#### GEN for training #####
+gen_real_gen = generator_real_gen((latent_dim,), batch_size, generator, 
+                                  x_train, prob_g=.5, label_gen=0.)
+gen_real_gen_eval = generator_real_gen((latent_dim,), batch_size, 
+                                       generator, x_test, prob_g=.5,
+                                       label_gen=0.)
+                                       
+print("Test generators")
+x, y = gen_real_gen.next()
+                                       
+discriminator_train.fit_generator(gen_real_gen, 60000//batch_size, epochs=20,
+    validation_data=gen_real_gen_eval, validation_steps=10000//batch_size)
+
+
+#################################################
+#################### PLOTS ######################
+#plot_latent_space(x_test, y_test, encoder, batch_size, 
+#                  "img/vae_latent_space.png")
+#plot_manifold(generator, batch_size)
+
+
+
+    

@@ -22,15 +22,16 @@ class generator_seed(object):
 
 
 class generator_real_gen(object):
-    def __init__(self, shape_seed, shape_img, batch_size, model_g, real_data,
+    def __init__(self, shape_seed, batch_size, model_g, real_data,
                  prob_g=0.5, label_gen=0.):
         self.shape_seed = shape_seed
-        self.shape_img = shape_img
+        
         self.batch_size = batch_size
         self.model_g = model_g
         self.prob_g = prob_g
         self.label_gen = label_gen
         self.real_data = real_data
+        self.shape_img = real_data.shape[1:]
         self.mode = None
 
 
@@ -55,12 +56,12 @@ class generator_real_gen(object):
     
             real_idx = np.random.randint(0,high=self.real_data.shape[0],
                                         size=self.batch_size - k)
-            X[k:] = self.real_data[real_idx,:,:,np.newaxis]
+            X[k:] = self.real_data[real_idx,:,:]
         if self.mode == "real":
             y = np.full((self.batch_size,), 1 - self.label_gen)
             real_idx = np.random.randint(0,high=self.real_data.shape[0],
                                          size=self.batch_size)
-            X = self.real_data[real_idx,:,:,np.newaxis]
+            X = self.real_data[real_idx,:,:]
         if self.mode == "gen":
             y = np.full((self.batch_size,), self.label_gen)
             seed = np.random.normal(size=self.batch_size*np.prod(self.shape_seed))
@@ -74,7 +75,7 @@ class generator_real_gen(object):
         y = np.full((batch_size,), 1 - self.label_gen)
         real_idx = np.random.randint(0,high=self.real_data.shape[0],
                                      size=batch_size)
-        X = self.real_data[real_idx,:,:,np.newaxis]
+        X = self.real_data[real_idx,:,:]
 
         return X, y
     
