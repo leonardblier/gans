@@ -64,27 +64,64 @@ class EarlyStoppingBound(Callback):
             
             
 class CustomVariationalLayer(Layer):
-    def __init__(self, img_rows, img_cols, **kwargs):
+    def __init__(self, img_rows, img_cols, weight=False, 
+                 model="gaussian_logsigma", **kwargs):
         self.is_placeholder = True
         self.img_rows = img_rows
         self.img_cols = img_cols
+        self.weight = weight
+        self.model=model 
+        
         super(CustomVariationalLayer, self).__init__(**kwargs)
 
-    def vae_loss(self, x, x_decoded_mean_squash, z_mean, z_log_var):
-        x = K.flatten(x)
-        x_decoded_mean_squash = K.flatten(x_decoded_mean_squash)
+    def binary_loss(self, x, x_decoded_mean_squash):
         xent_loss = self.img_rows * self.img_cols * \
             metrics.binary_crossentropy(x, x_decoded_mean_squash)
+        return xent_loss
+    
+    def gaussian_loss(self, x, mu, logsigma=None):
+        loss = 0.
+        quad = K.batch_dot(K.pow(x - mu, 2)
+        if logsigma is not None:
+            loss += 0.5 * K.sum(logsigma, axis=-1)
+            sigma_inv = K.exp(-logsigma)
+            loss += K.batch_dot(sigma_inv, quad)
+        else:
+            loss += K.sum(quad, axis=-1)
+        return loss
+        
+        
+        
+    def vae_loss(self, x, x_decoded_mean_squash, z_mean, z_log_var, 
+                 x_log_var=None, weight=None):
+        x = K.flatten(x)
+        x_decoded_mean_squash = K.flatten(x_decoded_mean_squash)
+        if x_log_var is not None:
+            x_log_var = K.flatten(x_log_var)
+        if model == "binary":
+            xent_loss = self.binary_loss(x, x_decoded_mean_squash)
+        elif model.startswith("gaussian"):
+            xent_loss = self.gaussian_loss(x, x_decoded_mean_squash, 
+                                           x_log_var)
         kl_loss = - 0.5 * K.mean(1 + z_log_var - K.square(z_mean) - \
             K.exp(z_log_var), axis=-1)
-        return K.mean(xent_loss + kl_loss)
+        loss = kl_loss + xent_loss
+        if self.weight:
+            loss = weight * loss
+        return K.mean(loss)
 
     def call(self, inputs):
-        x = inputs[0]
-        x_decoded_mean_squash = inputs[1]
-        z_mean = inputs[2]
-        z_log_var = inputs[3]
-        loss = self.vae_loss(x, x_decoded_mean_squash, z_mean, z_log_var)
+        x, x_decoded_mean_squash, z_mean, z_log_var = inputs[:4]
+        inputs = inputs[4:]
+        x_log_var = None
+        if self.model == "gaussian_logsigma":
+            x_log_var = inputs.pop(0)
+        weight = None
+        if self.weight:
+            weight = inputs.pop(0)
+        
+        loss = self.vae_loss(x, x_decoded_mean_squash, z_mean, 
+                             z_log_var, weight)
         self.add_loss(loss, inputs=inputs)
         # We don't use this output.
         return x

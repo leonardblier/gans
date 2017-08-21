@@ -5,6 +5,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.patches import Ellipse
+
 
 def plot_metrics(d, namefile="metrics.png"):
     """
@@ -158,17 +160,45 @@ def plot_all(loss_dict, acc_dict, batch_true, batch_gen,
         ax_gen.imshow(X, aspect='equal', interpolation='none')
     #gs.tight_layout()
     gs.update(hspace=1.)
-    plt.savefig(namefile, format='pdf')
     
     
-def plot_latent_space(x, y, encoder, batch_size, namefile):
-    x_encoded = encoder.predict(x, batch_size=batch_size)
-    plt.figure(figsize=(6, 6))
-    plt.scatter(x_encoded[:, 0], x_encoded[:, 1], c=y)
-    plt.colorbar()
+    
+def plot_latent_space(x, y, encoder, batch_size, namefile, 
+                      epsilon_std=1., ellipse=True):
+    fig = plt.figure(0, dpi=600)
+    ax = fig.add_subplot(111, aspect='equal')
+    #ax = plt.subplot(111)
+    x_encoded, x_logvar = encoder.predict(x, batch_size=batch_size)
+    #plt.figure(figsize=(6, 6))
+    # area = pi*r**2 : r = 3sigma*epsilon_std
+    if ellipse:
+        cmap = plt.get_cmap("Vega10")
+        dx = 4*np.exp(epsilon_std*x_logvar)
+        #dx_in_points = ax.transData.transform(dx) - ax.transData.transform((0,0))
+        #dx_in_points = dx_in_points / 100
+        ells = [Ellipse(xy=xy, width=dx, height=dy, ls="-",lw=0.2) \
+                for (xy, (dx,dy)) in zip(x_encoded, dx)] 
+        for (e, label) in zip(ells, y):
+            ax.add_artist(e)
+            e.set_clip_box(ax.bbox)
+            e.set_facecolor(cmap(label/10))
+            e.set_edgecolor("k")
+            e.set_alpha(0.3)
+    else:
+        plt.scatter(x_encoded[:, 0], x_encoded[:, 1],
+                    c=y, alpha=0.5, cmap="tab10")
+    #plt.colorbar()
+    ax.set_xlim(-5, 5)
+    ax.set_ylim(-5, 5)
+    fig.suptitle('Latent space, with 2sigma ellipses')
+
     plt.savefig(namefile)
+    plt.clf()
+    plt.close()
     
-def plot_manifold(generator, batch_size, ndigits=15, digit_size=28):
+    
+def plot_manifold(generator, batch_size, namefile, 
+                  ndigits=15, digit_size=28):
     # display a 2D manifold of the digits
     n = 15  # figure with 15x15 digits
     digit_size = 28
@@ -189,4 +219,4 @@ def plot_manifold(generator, batch_size, ndigits=15, digit_size=28):
     
     plt.figure(figsize=(10, 10))
     plt.imshow(figure, cmap='Greys_r')
-    plt.savefig("img/vae_manifold.png")
+    plt.savefig(namefile)

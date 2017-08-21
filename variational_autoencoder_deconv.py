@@ -87,7 +87,6 @@ hidden = Dense(intermediate_dim, activation='relu')(flat)
 z_mean = Dense(latent_dim)(hidden)
 z_log_var = Dense(latent_dim)(hidden)
 
-
 def sampling(args):
     z_mean, z_log_var = args
     epsilon = K.random_normal(shape=(batch_size, latent_dim),
@@ -95,6 +94,10 @@ def sampling(args):
     return z_mean + K.exp(z_log_var) * epsilon
 
 z = Lambda(sampling)([z_mean, z_log_var])
+
+
+encoder_meanvar = Model(x, [z_mean, z_log_var])
+encoder_sample = Model(x, z)
 
 #################################################
 ################## DECODER ######################
